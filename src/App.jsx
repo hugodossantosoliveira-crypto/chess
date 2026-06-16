@@ -1550,6 +1550,8 @@ const ENDGAMES = [
     fens: ['4k3/8/8/8/8/8/3R4/4K3 w - - 0 1', '8/8/8/4k3/8/8/7R/4K3 w - - 0 1'] },
   { id: 'rr', name: "L'échelle (deux Tours)", goal: 'mate', tip: "Une Tour bloque la rangée du roi, l'autre monte d'un cran pour le repousser. On alterne : c'est le mat le plus simple.",
     fens: ['4k3/8/8/8/8/8/R6R/4K3 w - - 0 1', '8/8/4k3/8/8/8/RR6/4K3 w - - 0 1'] },
+  { id: 'net', name: 'Filets de mat', goal: 'mate', tip: "Tu es en position de force : trouve la séquence forcée qui mate (souvent 1 à 2 coups). Astuce : cherche d'abord les échecs qui enferment le roi sans lui laisser de fuite. L'adversaire se défend au mieux.",
+    fens: ['6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1', '6k1/5ppp/8/8/8/8/8/R3R1K1 w - - 0 1', '5k2/8/5K2/8/8/8/8/7Q w - - 0 1', '6k1/5N2/6K1/8/8/8/8/3Q4 w - - 0 1', '6k1/8/8/8/8/8/1R6/R5K1 w - - 0 1', '6k1/8/8/8/8/8/5Q2/R5K1 w - - 0 1'] },
   { id: 'p', name: 'Pousser le pion à Dame', goal: 'promote', tip: "Place ton Roi DEVANT le pion et prends l'opposition pour ouvrir le passage. Objectif : promouvoir le pion en Dame.",
     fens: ['4k3/8/4K3/4P3/8/8/8/8 w - - 0 1', '2k5/8/2K5/2P5/8/8/8/8 w - - 0 1'] },
 ];
