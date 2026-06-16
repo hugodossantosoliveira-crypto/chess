@@ -863,11 +863,13 @@ const IconBook = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="no
 const IconBolt = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z" /></svg>);
 const IconChart = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20V10M10 20V4M16 20v-6M22 20H2" /></svg>);
 const IconScope = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M11 7v8M7 11h8M20 20l-3.2-3.2" /></svg>);
+const IconFlag = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M5 21V4M5 4h12l-2.5 3.5L17 11H5" /></svg>);
 const IconKnight = () => (<img className="knish" alt="" src={pieceImg('wN')} />);
 const TABS = [
   { id: 'principes', label: 'Principes', icon: <IconBook /> },
   { id: 'ouvertures', label: 'Ouvertures', icon: <IconKnight /> },
   { id: 'tactiques', label: 'Tactiques', icon: <IconBolt /> },
+  { id: 'finales', label: 'Finales', icon: <IconFlag /> },
   { id: 'analyse', label: 'Analyse', icon: <IconScope /> },
   { id: 'progres', label: 'Progrès', icon: <IconChart /> },
 ];
@@ -1539,6 +1541,147 @@ function AnalyseView() {
   );
 }
 
+// ===== Finales (endgame trainer vs Stockfish) =====
+function replayFrom(fen, sans) { const g = safeGame(fen); for (const s of (sans || [])) { if (!safeMove(g, s)) break; } return g; }
+const ENDGAMES = [
+  { id: 'q', name: 'Mater avec la Dame', goal: 'mate', tip: "Repousse le roi noir vers un bord avec la Dame en gardant une case d'écart (gare au pat !), puis amène ton Roi pour donner le mat.",
+    fens: ['4k3/8/8/8/8/8/3Q4/4K3 w - - 0 1', '8/8/8/3k4/8/8/Q7/4K3 w - - 0 1'] },
+  { id: 'r', name: 'Mater avec la Tour', goal: 'mate', tip: "La Tour coupe une rangée, ton Roi avance juste en face du roi noir (opposition). On le pousse vers le bord, puis mat.",
+    fens: ['4k3/8/8/8/8/8/3R4/4K3 w - - 0 1', '8/8/8/4k3/8/8/7R/4K3 w - - 0 1'] },
+  { id: 'rr', name: "L'échelle (deux Tours)", goal: 'mate', tip: "Une Tour bloque la rangée du roi, l'autre monte d'un cran pour le repousser. On alterne : c'est le mat le plus simple.",
+    fens: ['4k3/8/8/8/8/8/R6R/4K3 w - - 0 1', '8/8/4k3/8/8/8/RR6/4K3 w - - 0 1'] },
+  { id: 'p', name: 'Pousser le pion à Dame', goal: 'promote', tip: "Place ton Roi DEVANT le pion et prends l'opposition pour ouvrir le passage. Objectif : promouvoir le pion en Dame.",
+    fens: ['4k3/8/4K3/4P3/8/8/8/8 w - - 0 1', '2k5/8/2K5/2P5/8/8/8/8 w - - 0 1'] },
+];
+async function bestUciFor(fen, depth) {
+  try { const eng = getSF(); const ok = await eng.whenReady(); if (ok) { const r = await eng.evaluate(fen, depth); if (r && r.bestUci) return r.bestUci; } } catch (e) {}
+  const r2 = egBest(fen, 3, 280); return r2 && r2.move ? (r2.move.from + r2.move.to + (r2.move.promotion || '')) : null;
+}
+
+function EndgamesView() {
+  const [egi, setEgi] = useState(-1);
+  const [fenIdx, setFenIdx] = useState(0);
+  const [history, setHistory] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [targets, setTargets] = useState([]);
+  const [status, setStatus] = useState('playing');
+  const [thinking, setThinking] = useState(false);
+  const [hint, setHint] = useState(null);
+  const runRef = useRef(0);
+
+  const eg = egi >= 0 ? ENDGAMES[egi] : null;
+  const startFen = eg ? eg.fens[fenIdx % eg.fens.length] : START_FEN;
+  const game = replayFrom(startFen, history);
+  const fen = game.fen();
+  const turn = game.turn();
+  const ck = checkSq(fen);
+  const lm = (() => { try { const h = game.history({ verbose: true }); return h.length ? { from: h[h.length - 1].from, to: h[h.length - 1].to } : null; } catch (e) { return null; } })();
+  const moveCount = Math.ceil(history.length / 2);
+  const canMove = status === 'playing' && !thinking && turn === 'w';
+
+  function resetPos() { setHistory([]); setStatus('playing'); setSelected(null); setTargets([]); setHint(null); setThinking(false); runRef.current++; }
+  function startEg(i) { setEgi(i); setFenIdx(0); setHistory([]); setStatus('playing'); setSelected(null); setTargets([]); setHint(null); setThinking(false); runRef.current++; }
+  function nextPos() { runRef.current++; setFenIdx(f => (f + 1) % (eg ? eg.fens.length : 1)); setHistory([]); setStatus('playing'); setSelected(null); setTargets([]); setHint(null); setThinking(false); }
+
+  function selectSq(g, sq) { const ms = g.moves({ square: sq, verbose: true }); setSelected(sq); setTargets(ms.map(m => m.to)); }
+  function onSquare(sq) {
+    if (!canMove) return;
+    const g = replayFrom(startFen, history);
+    if (g.turn() !== 'w') return;
+    setHint(null);
+    if (selected) {
+      if (sq === selected) { setSelected(null); setTargets([]); return; }
+      if (targets.includes(sq)) {
+        const mv = safeMove(g, { from: selected, to: sq, promotion: 'q' });
+        if (mv) { setSelected(null); setTargets([]); commitPlayer([...history, mv.san]); return; }
+      }
+      const p = g.get(sq);
+      if (p && p.color === 'w') { selectSq(g, sq); return; }
+      setSelected(null); setTargets([]); return;
+    }
+    const p = g.get(sq);
+    if (p && p.color === 'w') selectSq(g, sq);
+  }
+
+  async function commitPlayer(nh) {
+    setHistory(nh);
+    const token = ++runRef.current;
+    const g = replayFrom(startFen, nh);
+    if (g.isCheckmate()) { setStatus('won'); return; }
+    if (g.isStalemate()) { setStatus('stalemate'); return; }
+    const last = nh[nh.length - 1] || '';
+    if (eg.goal === 'promote' && last.indexOf('=') >= 0) { setStatus('won'); return; }
+    if (isOver(g)) { setStatus('draw'); return; }
+    setThinking(true);
+    const uci = await bestUciFor(g.fen(), 12);
+    if (token !== runRef.current) return;
+    setThinking(false);
+    if (!uci) return;
+    const g2 = replayFrom(startFen, nh);
+    const mv = safeMove(g2, { from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.length > 4 ? uci[4] : undefined });
+    if (!mv) return;
+    const nh2 = [...nh, mv.san];
+    setHistory(nh2);
+    const g3 = replayFrom(startFen, nh2);
+    if (g3.isStalemate()) { setStatus('stalemate'); return; }
+    if (isOver(g3)) { setStatus('draw'); return; }
+  }
+
+  async function doHint() {
+    if (!canMove) return;
+    const g = replayFrom(startFen, history);
+    if (g.turn() !== 'w') return;
+    setThinking(true);
+    const uci = await bestUciFor(g.fen(), 14);
+    setThinking(false);
+    if (uci) { const f = uci.slice(0, 2), t = uci.slice(2, 4); setSelected(f); setTargets([t]); setHint({ from: f, to: t }); }
+  }
+
+  if (!eg) {
+    return (
+      <div className="view">
+        <h2 className="sec">Finales</h2>
+        <p className="lead">Entraîne les finales gagnantes contre Stockfish, qui défend au mieux. Tu joues les Blancs ; un bouton « Indice » t'aide si tu bloques.</p>
+        <div className="ogroup">
+          {ENDGAMES.map((e, i) => (
+            <button key={e.id} className="card ocard" onClick={() => startEg(i)}>
+              <div className="ocard-t">{e.name}</div>
+              <div className="ocard-d">{e.tip}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="view explorer">
+      <button className="back" onClick={() => setEgi(-1)}>← Toutes les finales</button>
+      <div className="card openname-card">
+        <div className="hot-k">{eg.goal === 'promote' ? 'Objectif : promouvoir' : 'Objectif : mat'}</div>
+        <div className="openname">{eg.name}</div>
+        <p className="ptext">{eg.tip}</p>
+      </div>
+
+      <Board fen={fen} orientation="w" selected={selected} targets={targets} lastMove={lm} checkSquare={ck} hintSquare={hint ? hint.to : null} onSquareClick={onSquare} disabled={!canMove} />
+
+      <div className={'egstatus ' + (status === 'won' ? 'ok' : (status === 'stalemate' || status === 'draw') ? 'warn' : '')}>
+        {status === 'won' ? (eg.goal === 'promote' ? '✓ Pion promu en Dame — bien joué !' : '✓ Échec et mat — bien joué !')
+          : status === 'stalemate' ? '⚠ Pat : le roi n\'a plus aucun coup légal, la partie est nulle. Réessaie en lui laissant toujours une case.'
+            : status === 'draw' ? '⚠ Nulle (50 coups ou matériel insuffisant). Réessaie.'
+              : thinking ? 'Stockfish défend…' : (eg.goal === 'promote' ? 'À toi (Blancs) — fais passer ton pion.' : 'À toi (Blancs) — mate le roi noir.')}
+      </div>
+
+      <div className="row gap egctrl">
+        <button className="btn btn-ghost" onClick={doHint} disabled={!canMove}>💡 Indice</button>
+        <button className="btn btn-ghost" onClick={resetPos}>↺ Rejouer</button>
+        {eg.fens.length > 1 && <button className="btn btn-ghost" onClick={nextPos}>Position suivante</button>}
+      </div>
+      <div className="dim egmeta">Coups joués : {moveCount}</div>
+    </div>
+  );
+}
+
 // ===== App =====
 export default function App() {
   const [tab, setTab] = useState('ouvertures');
@@ -1570,6 +1713,7 @@ export default function App() {
           {tab === 'principes' && <PrinciplesView />}
           {tab === 'ouvertures' && <OuverturesView st={st} onMaster={masterOpening} />}
           {tab === 'tactiques' && <TacticsView st={st} pzIdx={pzIdx} setPzIdx={setPzIdx} onAttempt={puzzleAttempt} onSolved={puzzleSolved} />}
+          {tab === 'finales' && <EndgamesView />}
           {tab === 'analyse' && <AnalyseView />}
           {tab === 'progres' && <ProgressView st={st} onReset={resetProgress} />}
         </main>
@@ -1745,10 +1889,10 @@ const CSS = `
   background:rgba(16,16,22,.72); border:1px solid var(--line); border-radius:20px; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
   box-shadow:0 12px 40px rgba(0,0,0,.5); }
 .dockb{ display:flex; flex-direction:column; align-items:center; gap:3px; border:none; background:none; color:var(--muted);
-  padding:8px 2px; border-radius:13px; transition:.18s; flex:1 1 0; min-width:0; }
+  padding:8px 1px; border-radius:13px; transition:.18s; flex:1 1 0; min-width:0; }
 .dockb .dicon{ display:grid; place-items:center; height:22px; }
 .dockb .knish{ width:21px; height:21px; opacity:.6; filter:grayscale(1) brightness(1.4); transition:.18s; }
-.dlbl{ font-size:10px; font-weight:600; letter-spacing:0; white-space:nowrap; }
+.dlbl{ font-size:9.5px; font-weight:600; letter-spacing:0; white-space:nowrap; }
 .dockb.on{ color:#241c08; background:linear-gradient(135deg,#d9b45a,#f2d898); }
 .dockb.on .knish{ opacity:1; filter:none; }
 
@@ -1880,4 +2024,13 @@ const CSS = `
 .flipbtn{ align-self:center; margin-top:-4px; background:rgba(255,255,255,.04); border:1px solid var(--line); color:var(--muted);
   font-size:12.5px; font-weight:600; padding:7px 16px; border-radius:999px; transition:.16s; }
 .flipbtn:hover{ color:var(--txt); border-color:rgba(230,193,104,.4); }
+
+/* Finales */
+.egstatus{ text-align:center; font-size:13.5px; font-weight:600; color:var(--txt); padding:11px 14px; border-radius:13px;
+  background:var(--panel); border:1px solid var(--line); line-height:1.45; }
+.egstatus.ok{ color:#bfe9cf; background:rgba(134,217,166,.12); border-color:rgba(134,217,166,.4); }
+.egstatus.warn{ color:#f0d98a; background:rgba(230,200,90,.1); border-color:rgba(230,200,90,.4); }
+.egctrl{ flex-wrap:wrap; }
+.egctrl .btn{ flex:1; min-width:120px; padding:11px 10px; }
+.egmeta{ text-align:center; font-size:12px; margin-top:-4px; }
 `;
