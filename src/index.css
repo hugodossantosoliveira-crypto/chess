@@ -1,0 +1,5 @@
+:root { color-scheme: dark; }
+* { -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; background: #08080c; }
+body { overscroll-behavior: none; }
+#root { min-height: 100vh; min-height: 100dvh; }
