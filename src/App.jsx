@@ -862,11 +862,13 @@ function Ring({ pct = 0, size = 60 }) {
 const IconBook = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z" /><path d="M20 18v3H6.5A2.5 2.5 0 0 1 4 18.5" /></svg>);
 const IconBolt = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z" /></svg>);
 const IconChart = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20V10M10 20V4M16 20v-6M22 20H2" /></svg>);
+const IconScope = () => (<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M11 7v8M7 11h8M20 20l-3.2-3.2" /></svg>);
 const IconKnight = () => (<img className="knish" alt="" src={pieceImg('wN')} />);
 const TABS = [
   { id: 'principes', label: 'Principes', icon: <IconBook /> },
   { id: 'ouvertures', label: 'Ouvertures', icon: <IconKnight /> },
   { id: 'tactiques', label: 'Tactiques', icon: <IconBolt /> },
+  { id: 'analyse', label: 'Analyse', icon: <IconScope /> },
   { id: 'progres', label: 'Progrès', icon: <IconChart /> },
 ];
 
@@ -942,6 +944,7 @@ function ExplorerView() {
   const [history, setHistory] = useState([]);
   const [appSide, setAppSide] = useState('w'); // 'w' | 'b' | null (libre)
   const [elo, setElo] = useState(800);
+  const [flip, setFlip] = useState(false);
   const [selected, setSelected] = useState(null);
   const [targets, setTargets] = useState([]);
   const [analysis, setAnalysis] = useState(null);
@@ -960,7 +963,7 @@ function ExplorerView() {
   const lm = lastVerbose(game);
   const lastMove = lm ? { from: lm.from, to: lm.to } : null;
   const hugoSide = appSide ? (appSide === 'w' ? 'b' : 'w') : turn;
-  const orientation = appSide ? (appSide === 'w' ? 'b' : 'w') : 'w';
+  const orientation = appSide ? (appSide === 'w' ? 'b' : 'w') : (flip ? 'b' : 'w');
   const movableColor = appSide ? hugoSide : turn;
   const canMove = !over && (appSide ? turn === hugoSide : true);
   const ck = checkSq(fen);
@@ -1068,6 +1071,10 @@ function ExplorerView() {
 
       <Board fen={fen} orientation={orientation} selected={selected} targets={targets} lastMove={lastMove}
         checkSquare={ck} onSquareClick={onSquare} disabled={!canMove} />
+
+      {appSide === null && (
+        <button className="flipbtn" onClick={() => setFlip(f => !f)}>⇅ Vue {flip ? 'Blancs' : 'Noirs'}</button>
+      )}
 
       <div className="turnline">
         {over ? <span className="turn-dot ok" /> : <span className={'turn-dot ' + (turn === 'w' ? 'tw' : 'tb')} />}
@@ -1225,6 +1232,313 @@ function ProgressView({ st, onReset }) {
   );
 }
 
+// ===== Stockfish engine client (bundled, same-origin Web Worker) =====
+let _sf = null;
+function getSF() {
+  if (_sf) return _sf;
+  const api = { worker: null, ready: false, failed: false, q: [], cur: null, onready: [] };
+  function pump() {
+    if (!api.ready || api.cur || !api.q.length) return;
+    const job = api.q.shift(); api.cur = job; job.lastType = null; job.lastVal = null;
+    try {
+      api.worker.postMessage('position fen ' + job.fen);
+      api.worker.postMessage('go depth ' + job.depth);
+      job.timer = setTimeout(() => { try { api.worker.postMessage('stop'); } catch (e) {} }, 7000);
+    } catch (e) { job.resolve(null); api.cur = null; }
+  }
+  try { api.worker = new Worker('/stockfish.js'); }
+  catch (e) { api.failed = true; return (_sf = api); }
+  api.worker.onmessage = (e) => {
+    const line = typeof e.data === 'string' ? e.data : (e.data && e.data.data) || '';
+    if (!line) return;
+    if (line.indexOf('uciok') === 0) { try { api.worker.postMessage('isready'); } catch (er) {} return; }
+    if (line.indexOf('readyok') === 0) { if (!api.ready) { api.ready = true; api.onready.splice(0).forEach(fn => fn(true)); pump(); } return; }
+    const sm = /score (cp|mate) (-?\d+)/.exec(line);
+    if (sm && api.cur) { api.cur.lastType = sm[1]; api.cur.lastVal = parseInt(sm[2], 10); }
+    if (line.indexOf('bestmove') === 0 && api.cur) {
+      const job = api.cur; api.cur = null; if (job.timer) clearTimeout(job.timer);
+      const bm = line.split(/\s+/)[1] || null;
+      job.resolve({ type: job.lastType, val: job.lastVal, bestUci: (bm && bm !== '(none)') ? bm : null });
+      pump();
+    }
+  };
+  api.worker.onerror = () => { api.failed = true; if (api.cur) { api.cur.resolve(null); api.cur = null; } api.q.splice(0).forEach(j => j.resolve(null)); api.onready.splice(0).forEach(fn => fn(false)); };
+  api.evaluate = (fen, depth) => new Promise((resolve) => { if (api.failed) return resolve(null); api.q.push({ fen, depth, resolve }); pump(); });
+  api.whenReady = () => new Promise((resolve) => { if (api.ready) return resolve(true); if (api.failed) return resolve(false); api.onready.push(resolve); });
+  try { api.worker.postMessage('uci'); } catch (e) { api.failed = true; }
+  setTimeout(() => { if (!api.ready && !api.failed) { api.failed = true; api.onready.splice(0).forEach(fn => fn(false)); } }, 12000);
+  return (_sf = api);
+}
+
+// ===== Analysis helpers (chess.com-style review) =====
+function scoreToCp(r) { if (!r || r.type == null) return 0; if (r.type === 'mate') return r.val > 0 ? 100000 - r.val * 100 : -100000 - r.val * 100; return r.val || 0; }
+function winPct(cp) { const c = Math.max(-1500, Math.min(1500, cp)); return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * c)) - 1); }
+function classifyCPL(c) { if (c <= 10) return 'Meilleur'; if (c <= 25) return 'Excellent'; if (c <= 50) return 'Bien'; if (c <= 100) return 'Imprécision'; if (c <= 250) return 'Erreur'; return 'Gaffe'; }
+function moveAcc(wb, wa) { const d = Math.max(0, wb - wa); return Math.max(0, Math.min(100, 103.1668 * Math.exp(-0.04354 * d) - 3.1669)); }
+const CLS_CLASS = { 'Théorie': 'b-book', 'Meilleur': 'b-best', 'Excellent': 'b-exc', 'Bien': 'b-good', 'Imprécision': 'b-inacc', 'Erreur': 'b-mistake', 'Gaffe': 'b-blunder' };
+function parseGame(pgn) {
+  const g = new Chess();
+  try { g.loadPgn(pgn); } catch (e) { /* keep whatever parsed */ }
+  let moves = [];
+  try { moves = g.history(); } catch (e) { moves = []; }
+  if (!moves.length) return null;
+  let headers = {}; try { headers = g.header() || {}; } catch (e) {}
+  return { moves, headers };
+}
+const RESULT_DRAW = ['stalemate', 'agreed', 'repetition', 'insufficient', '50move', 'timevsinsufficient'];
+async function fetchChessCom(username) {
+  const u = (username || '').trim().toLowerCase().replace(/^@/, '');
+  if (!u) throw new Error('pseudo vide');
+  const ar = await fetch('https://api.chess.com/pub/player/' + encodeURIComponent(u) + '/games/archives');
+  if (!ar.ok) throw new Error('joueur introuvable');
+  const aj = await ar.json();
+  const urls = (aj.archives || []).slice(-3).reverse();
+  let all = [];
+  for (const url of urls) { const r = await fetch(url); if (!r.ok) continue; const j = await r.json(); all = all.concat(j.games || []); if (all.length >= 30) break; }
+  all = all.filter(x => x.pgn && x.rules === 'chess').sort((a, b) => (b.end_time || 0) - (a.end_time || 0)).slice(0, 16);
+  if (!all.length) throw new Error('aucune partie récente');
+  return all.map(g => {
+    const me = (g.white && g.white.username && g.white.username.toLowerCase() === u) ? 'w' : 'b';
+    const mine = me === 'w' ? g.white : g.black; const opp = me === 'w' ? g.black : g.white;
+    const res = mine ? mine.result : null;
+    const youRes = res === 'win' ? 'Victoire' : (RESULT_DRAW.includes(res) ? 'Nulle' : 'Défaite');
+    return { pgn: g.pgn, youColor: me, youName: mine ? mine.username : '?', oppName: opp ? opp.username : '?', oppRating: opp ? opp.rating : null, youRating: mine ? mine.rating : null, youRes, timeClass: g.time_class || '', endTime: g.end_time || 0 };
+  });
+}
+function fmtDate(ts) { if (!ts) return ''; try { return new Date(ts * 1000).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' }); } catch (e) { return ''; } }
+
+function AnalyseView() {
+  const [username, setUsername] = useState('');
+  const [games, setGames] = useState([]);
+  const [loadingGames, setLoadingGames] = useState(false);
+  const [gamesErr, setGamesErr] = useState(null);
+  const [showPaste, setShowPaste] = useState(false);
+  const [pgnText, setPgnText] = useState('');
+  const [game, setGame] = useState(null);
+  const [level, setLevel] = useState(11);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [engineErr, setEngineErr] = useState(null);
+  const [result, setResult] = useState(null);
+  const [viewPly, setViewPly] = useState(0);
+  const runRef = useRef(0);
+
+  async function doLoadGames() {
+    setGamesErr(null); setLoadingGames(true); setGames([]); setGame(null); setResult(null);
+    try { const list = await fetchChessCom(username); setGames(list); }
+    catch (e) { setGamesErr("Impossible de charger les parties (" + (e.message || 'erreur') + "). Vérifie le pseudo, ou colle un PGN."); }
+    setLoadingGames(false);
+  }
+  function selectGame(meta) {
+    const parsed = parseGame(meta.pgn);
+    if (!parsed) { setGamesErr('PGN illisible pour cette partie.'); return; }
+    setGame({ moves: parsed.moves, youColor: meta.youColor, youName: meta.youName, oppName: meta.oppName,
+      whiteName: meta.youColor === 'w' ? meta.youName : meta.oppName, blackName: meta.youColor === 'w' ? meta.oppName : meta.youName,
+      resultText: parsed.headers.Result || '', youRes: meta.youRes });
+    setResult(null); setViewPly(0); setEngineErr(null); setProgress(0);
+  }
+  function loadPasted() {
+    const parsed = parseGame(pgnText);
+    if (!parsed) { setGamesErr('PGN illisible. Vérifie le format (copie le PGN complet).'); return; }
+    const h = parsed.headers;
+    setGame({ moves: parsed.moves, youColor: 'w', youName: h.White || 'Blancs', oppName: h.Black || 'Noirs',
+      whiteName: h.White || 'Blancs', blackName: h.Black || 'Noirs', resultText: h.Result || '', youRes: null });
+    setResult(null); setViewPly(0); setEngineErr(null); setGamesErr(null); setProgress(0); setGames([]);
+  }
+  async function runAnalysis() {
+    if (!game) return;
+    setEngineErr(null); setResult(null); setProgress(0); setAnalyzing(true);
+    const token = ++runRef.current;
+    const eng = getSF();
+    const ok = await eng.whenReady();
+    if (!ok) { if (token === runRef.current) { setEngineErr("Le moteur d'analyse n'a pas pu démarrer dans ce navigateur. Réessaie, ou utilise un autre navigateur (Chrome/Safari récents)."); setAnalyzing(false); } return; }
+    const g = new Chess(); const fens = [g.fen()];
+    for (const m of game.moves) { if (!safeMove(g, m)) break; fens.push(g.fen()); }
+    const evals = new Array(fens.length); const bu = new Array(fens.length);
+    for (let i = 0; i < fens.length; i++) {
+      if (token !== runRef.current) return;
+      const r = await eng.evaluate(fens[i], level);
+      if (token !== runRef.current) return;
+      if (!r) { setEngineErr("L'analyse s'est interrompue. Réessaie."); setAnalyzing(false); return; }
+      const stm = fens[i].split(' ')[1];
+      const cp = scoreToCp(r);
+      evals[i] = stm === 'w' ? cp : -cp;
+      bu[i] = r.bestUci;
+      setProgress(Math.round(((i + 1) / fens.length) * 100));
+    }
+    const plies = []; const accW = []; const accB = [];
+    for (let i = 0; i < game.moves.length; i++) {
+      const mw = (i % 2 === 0); const Ei = evals[i], Ej = evals[i + 1];
+      const cpl = Math.max(0, (mw ? Ei : -Ei) - (mw ? Ej : -Ej));
+      let bestSan = null;
+      try { const t = new Chess(fens[i]); const b = bu[i]; if (b) { const mv = t.move({ from: b.slice(0, 2), to: b.slice(2, 4), promotion: b.length > 4 ? b[4] : undefined }); if (mv) bestSan = mv.san; } } catch (e) {}
+      let aUci = null;
+      try { const t = new Chess(fens[i]); const mv = t.move(game.moves[i]); if (mv) aUci = mv.from + mv.to + (mv.promotion || ''); } catch (e) {}
+      const isBest = bu[i] && aUci && aUci === bu[i];
+      const inBook = bookState(game.moves.slice(0, i + 1)).inBook;
+      const cls = inBook ? 'Théorie' : ((isBest || cpl <= 10) ? 'Meilleur' : classifyCPL(cpl));
+      plies.push({ ply: i, san: game.moves[i], cls, cpl: Math.round(cpl), bestSan, evalAfter: Ej });
+      const wb = mw ? winPct(Ei) : 100 - winPct(Ei), wa = mw ? winPct(Ej) : 100 - winPct(Ej);
+      (mw ? accW : accB).push(moveAcc(wb, wa));
+    }
+    const avg = a => a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 10) / 10 : 100;
+    if (token !== runRef.current) return;
+    setResult({ evals, plies, accW: avg(accW), accB: avg(accB), fens });
+    setViewPly(game.moves.length); setAnalyzing(false);
+  }
+
+  const boardMoves = game ? game.moves.slice(0, viewPly) : [];
+  const bg = replayGame(boardMoves);
+  const bfen = bg.fen();
+  const blast = (() => { try { const h = bg.history({ verbose: true }); return h.length ? { from: h[h.length - 1].from, to: h[h.length - 1].to } : null; } catch (e) { return null; } })();
+  const orient = game ? game.youColor : 'w';
+  const ck = checkSq(bfen);
+  const keyMoments = result ? result.plies.filter(p => p.cls === 'Erreur' || p.cls === 'Gaffe').sort((a, b) => b.cpl - a.cpl).slice(0, 5) : [];
+  const youAcc = game ? (game.youColor === 'w' ? (result && result.accW) : (result && result.accB)) : null;
+  const oppAcc = game ? (game.youColor === 'w' ? (result && result.accB) : (result && result.accW)) : null;
+
+  const GW = 320, GH = 60, CAP = 800;
+  const graphPts = result ? result.evals.map((e, i) => {
+    const x = result.evals.length > 1 ? (i / (result.evals.length - 1)) * GW : 0;
+    const y = GH / 2 - Math.max(-CAP, Math.min(CAP, e)) / CAP * (GH / 2 - 3);
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }).join(' ') : '';
+
+  return (
+    <div className="view">
+      <h2 className="sec">Analyse de parties</h2>
+
+      {!game && (
+        <>
+          <p className="lead">Récupère tes parties chess.com et fais-les analyser par Stockfish : précision, qualité de chaque coup et moments-clés.</p>
+          <div className="card loadcard">
+            <label className="flbl">Ton pseudo chess.com</label>
+            <div className="row gap">
+              <input className="tin" value={username} placeholder="ex. magnuscarlsen" onChange={e => setUsername(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') doLoadGames(); }} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
+              <button className="btn btn-primary" onClick={doLoadGames} disabled={loadingGames}>{loadingGames ? '…' : 'Charger'}</button>
+            </div>
+            <button className="linklike" onClick={() => setShowPaste(s => !s)}>{showPaste ? '— masquer' : 'ou coller un PGN'}</button>
+            {showPaste && (
+              <div className="pastebox">
+                <textarea className="tarea" rows={5} value={pgnText} placeholder="Colle ici le PGN complet d'une partie…" onChange={e => setPgnText(e.target.value)} />
+                <button className="btn btn-ghost" onClick={loadPasted}>Charger ce PGN</button>
+              </div>
+            )}
+          </div>
+          {gamesErr && <div className="fb fb-bad">{gamesErr}</div>}
+          {games.length > 0 && (
+            <div className="gamelist">
+              {games.map((g, i) => (
+                <button key={i} className="card gamerow" onClick={() => selectGame(g)}>
+                  <span className={'rdot ' + (g.youRes === 'Victoire' ? 'rw' : g.youRes === 'Nulle' ? 'rd' : 'rl')} />
+                  <div className="grow-main">
+                    <div className="grow-t">vs {g.oppName} {g.oppRating ? <span className="dim">({g.oppRating})</span> : null}</div>
+                    <div className="grow-s mono dim">{g.youColor === 'w' ? 'Blancs' : 'Noirs'} · {g.timeClass} · {fmtDate(g.endTime)}</div>
+                  </div>
+                  <span className={'gres ' + (g.youRes === 'Victoire' ? 'gw' : g.youRes === 'Nulle' ? 'gd' : 'gl')}>{g.youRes}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {game && (
+        <>
+          <button className="back" onClick={() => { setGame(null); setResult(null); }}>← Autres parties</button>
+          <div className="card ghead">
+            <div className="gh-title">{game.whiteName} <span className="dim">—</span> {game.blackName}</div>
+            <div className="gh-sub mono dim">{game.resultText} · {game.moves.length} demi-coups{game.youRes ? ' · ' + game.youRes : ''}</div>
+          </div>
+
+          {!result && !analyzing && (
+            <div className="card">
+              <div className="flbl">Profondeur d'analyse</div>
+              <div className="seg seg-top">
+                <button className={'segb ' + (level === 8 ? 'on' : '')} onClick={() => setLevel(8)}>Rapide</button>
+                <button className={'segb ' + (level === 11 ? 'on' : '')} onClick={() => setLevel(11)}>Standard</button>
+                <button className={'segb ' + (level === 14 ? 'on' : '')} onClick={() => setLevel(14)}>Profond</button>
+              </div>
+              <button className="btn btn-primary full" onClick={runAnalysis}>Analyser la partie</button>
+              <div className="dim tiny">L'analyse tourne dans ton navigateur. Compte ~15 s (Rapide) à ~1 min (Profond) selon la longueur.</div>
+              {engineErr && <div className="fb fb-bad">{engineErr}</div>}
+            </div>
+          )}
+
+          {analyzing && (
+            <div className="card">
+              <div className="row between center"><span className="flbl">Analyse en cours…</span><span className="mono gold">{progress}%</span></div>
+              <div className="pbar"><div className="pbar-fg" style={{ width: progress + '%' }} /></div>
+            </div>
+          )}
+
+          <Board fen={bfen} orientation={orient} lastMove={blast} checkSquare={ck} disabled />
+
+          <div className="row between center navrow">
+            <button className="btn btn-ghost" onClick={() => setViewPly(0)} disabled={viewPly === 0}>⏮</button>
+            <button className="btn btn-ghost" onClick={() => setViewPly(p => Math.max(0, p - 1))} disabled={viewPly === 0}>◀</button>
+            <span className="mono dim navnum">{viewPly} / {game.moves.length}</span>
+            <button className="btn btn-ghost" onClick={() => setViewPly(p => Math.min(game.moves.length, p + 1))} disabled={viewPly >= game.moves.length}>▶</button>
+            <button className="btn btn-ghost" onClick={() => setViewPly(game.moves.length)} disabled={viewPly >= game.moves.length}>⏭</button>
+          </div>
+
+          {result && (
+            <>
+              <div className="card accrow">
+                <div className="acccol">
+                  <div className="accnum" style={{ color: 'var(--gold2)' }}>{youAcc}</div>
+                  <div className="acclbl">Toi <span className="dim">({game.youColor === 'w' ? 'Blancs' : 'Noirs'})</span></div>
+                </div>
+                <div className="accvs dim">précision</div>
+                <div className="acccol">
+                  <div className="accnum">{oppAcc}</div>
+                  <div className="acclbl">{game.oppName}</div>
+                </div>
+              </div>
+
+              <div className="card">
+                <div className="flbl">Évaluation</div>
+                <svg className="evalgraph" viewBox={'0 0 ' + GW + ' ' + GH} preserveAspectRatio="none"
+                  onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); const x = (e.clientX - r.left) / r.width; setViewPly(Math.max(0, Math.min(game.moves.length, Math.round(x * (result.evals.length - 1))))); }}>
+                  <rect x="0" y="0" width={GW} height={GH / 2} className="eg-wtop" />
+                  <rect x="0" y={GH / 2} width={GW} height={GH / 2} className="eg-wbot" />
+                  <line x1="0" y1={GH / 2} x2={GW} y2={GH / 2} className="eg-mid" />
+                  <polyline points={graphPts} className="eg-line" />
+                  <line x1={(viewPly / Math.max(1, result.evals.length - 1)) * GW} y1="0" x2={(viewPly / Math.max(1, result.evals.length - 1)) * GW} y2={GH} className="eg-cursor" />
+                </svg>
+              </div>
+
+              {keyMoments.length > 0 && (
+                <div className="card">
+                  <div className="flbl">Moments-clés</div>
+                  {keyMoments.map((p, i) => (
+                    <button key={i} className="keymo" onClick={() => setViewPly(p.ply + 1)}>
+                      <span className={'badge ' + CLS_CLASS[p.cls]}>{p.cls}</span>
+                      <span className="km-txt">{Math.floor(p.ply / 2) + 1}{p.ply % 2 === 0 ? '.' : '…'} {sanToFr(p.san)}{p.bestSan ? <span className="dim"> — mieux : {sanToFr(p.bestSan)}</span> : null}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="movelist">
+                {result.plies.map((p, i) => (
+                  <button key={i} className={'mlrow ' + (viewPly === p.ply + 1 ? 'on' : '')} onClick={() => setViewPly(p.ply + 1)}>
+                    <span className="ml-n mono dim">{p.ply % 2 === 0 ? (Math.floor(p.ply / 2) + 1) + '.' : ''}</span>
+                    <span className="ml-san mono">{sanToFr(p.san)}</span>
+                    <span className={'badge ' + CLS_CLASS[p.cls]}>{p.cls}</span>
+                    {(p.cls === 'Imprécision' || p.cls === 'Erreur' || p.cls === 'Gaffe') && p.bestSan && <span className="ml-best dim">→ {sanToFr(p.bestSan)}</span>}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ===== App =====
 export default function App() {
   const [tab, setTab] = useState('ouvertures');
@@ -1256,6 +1570,7 @@ export default function App() {
           {tab === 'principes' && <PrinciplesView />}
           {tab === 'ouvertures' && <OuverturesView st={st} onMaster={masterOpening} />}
           {tab === 'tactiques' && <TacticsView st={st} pzIdx={pzIdx} setPzIdx={setPzIdx} onAttempt={puzzleAttempt} onSolved={puzzleSolved} />}
+          {tab === 'analyse' && <AnalyseView />}
           {tab === 'progres' && <ProgressView st={st} onReset={resetProgress} />}
         </main>
       </div>
@@ -1425,14 +1740,15 @@ const CSS = `
 .resetbtn{ background:none; border:none; color:var(--muted); font-size:12.5px; padding:6px; align-self:center; text-decoration:underline; text-underline-offset:3px; }
 .resetbtn:hover{ color:var(--bad); }
 
-.dock{ position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:20; display:flex; gap:4px; padding:7px;
+.dock{ position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:20; display:flex; gap:3px; padding:6px;
+  width:calc(100vw - 16px); max-width:440px; justify-content:space-between;
   background:rgba(16,16,22,.72); border:1px solid var(--line); border-radius:20px; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
   box-shadow:0 12px 40px rgba(0,0,0,.5); }
 .dockb{ display:flex; flex-direction:column; align-items:center; gap:3px; border:none; background:none; color:var(--muted);
-  padding:8px 14px; border-radius:14px; transition:.18s; min-width:62px; }
+  padding:8px 2px; border-radius:13px; transition:.18s; flex:1 1 0; min-width:0; }
 .dockb .dicon{ display:grid; place-items:center; height:22px; }
 .dockb .knish{ width:21px; height:21px; opacity:.6; filter:grayscale(1) brightness(1.4); transition:.18s; }
-.dlbl{ font-size:10.5px; font-weight:600; letter-spacing:.01em; }
+.dlbl{ font-size:10px; font-weight:600; letter-spacing:0; white-space:nowrap; }
 .dockb.on{ color:#241c08; background:linear-gradient(135deg,#d9b45a,#f2d898); }
 .dockb.on .knish{ opacity:1; filter:none; }
 
@@ -1487,4 +1803,81 @@ const CSS = `
   color:var(--muted); background:var(--panel); border:1px solid var(--line); transition:.16s; }
 .elochip:hover{ color:var(--txt); border-color:rgba(230,193,104,.4); }
 .elochip.on{ color:#241c08; background:linear-gradient(135deg,#d9b45a,#f2d898); border-color:transparent; }
+
+/* ===== Analyse (chess.com review) ===== */
+.gold{ color:var(--gold2); }
+.tiny{ font-size:11px; line-height:1.45; margin-top:8px; }
+.full{ width:100%; }
+.btn-ghost{ background:rgba(255,255,255,.04); border:1px solid var(--line); color:var(--txt); }
+.btn-ghost:hover{ border-color:rgba(230,193,104,.4); }
+.fb{ font-size:13px; line-height:1.5; padding:11px 14px; border-radius:13px; border:1px solid var(--line); }
+.loadcard{ display:flex; flex-direction:column; gap:11px; }
+.flbl{ font-size:12px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+.tin{ flex:1; min-width:0; background:rgba(0,0,0,.25); border:1px solid var(--line); border-radius:12px; color:var(--txt);
+  font-size:15px; padding:11px 13px; outline:none; }
+.tin:focus{ border-color:rgba(230,193,104,.5); }
+.linklike{ align-self:flex-start; background:none; border:none; color:var(--gold2); font-size:13px; text-decoration:underline; text-underline-offset:3px; padding:2px 0; }
+.pastebox{ display:flex; flex-direction:column; gap:9px; }
+.tarea{ width:100%; resize:vertical; background:rgba(0,0,0,.25); border:1px solid var(--line); border-radius:12px; color:var(--txt);
+  font-family:'JetBrains Mono',monospace; font-size:12px; line-height:1.5; padding:11px 13px; outline:none; }
+.tarea:focus{ border-color:rgba(230,193,104,.5); }
+
+.gamelist{ display:flex; flex-direction:column; gap:8px; }
+.gamerow{ display:flex; align-items:center; gap:12px; text-align:left; padding:12px 14px; }
+.gamerow:hover{ border-color:rgba(230,193,104,.4); background:var(--panel2); }
+.rdot{ width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
+.rdot.rw{ background:var(--good); } .rdot.rd{ background:var(--muted); } .rdot.rl{ background:var(--bad); }
+.grow-main{ flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.grow-t{ font-size:14px; font-weight:600; color:var(--txt); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.grow-s{ font-size:11.5px; }
+.gres{ font-size:12px; font-weight:700; flex:0 0 auto; }
+.gres.gw{ color:var(--good); } .gres.gd{ color:var(--muted); } .gres.gl{ color:var(--bad); }
+
+.ghead{ display:flex; flex-direction:column; gap:3px; padding:13px 16px; }
+.gh-title{ font-family:'Fraunces',Georgia,serif; font-size:17px; font-weight:600; color:var(--txt); }
+.gh-sub{ font-size:12px; }
+
+.pbar{ height:8px; border-radius:999px; background:rgba(255,255,255,.08); overflow:hidden; margin-top:10px; }
+.pbar-fg{ height:100%; background:linear-gradient(90deg,var(--gold),var(--gold2)); transition:width .25s ease; }
+
+.navrow{ gap:8px; }
+.navrow .btn{ padding:9px 0; flex:1; font-size:15px; }
+.navnum{ font-size:12.5px; flex:0 0 auto; min-width:54px; text-align:center; }
+
+.accrow{ display:flex; align-items:center; justify-content:space-around; gap:10px; padding:18px 16px; }
+.acccol{ display:flex; flex-direction:column; align-items:center; gap:3px; }
+.accnum{ font-size:30px; font-weight:800; line-height:1; color:var(--txt); font-family:'Clash Display','Satoshi',sans-serif; }
+.acclbl{ font-size:12px; color:var(--txt); }
+.accvs{ font-size:10px; letter-spacing:.12em; text-transform:uppercase; }
+
+.evalgraph{ width:100%; height:62px; display:block; margin-top:10px; border-radius:10px; overflow:hidden; cursor:pointer; background:rgba(0,0,0,.25); }
+.eg-wtop{ fill:rgba(255,255,255,.05); } .eg-wbot{ fill:rgba(0,0,0,.28); }
+.eg-mid{ stroke:rgba(255,255,255,.18); stroke-width:.5; }
+.eg-line{ fill:none; stroke:var(--gold2); stroke-width:1.4; vector-effect:non-scaling-stroke; }
+.eg-cursor{ stroke:var(--gold); stroke-width:1; vector-effect:non-scaling-stroke; opacity:.85; }
+
+.keymo{ display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:none; border:none; padding:9px 2px; border-top:1px solid var(--line); }
+.keymo:first-of-type{ border-top:none; }
+.km-txt{ font-size:13px; color:var(--txt); }
+
+.movelist{ display:flex; flex-direction:column; max-height:340px; overflow-y:auto; border:1px solid var(--line); border-radius:14px; background:rgba(0,0,0,.18); }
+.mlrow{ display:flex; align-items:center; gap:9px; padding:8px 12px; background:none; border:none; border-bottom:1px solid rgba(255,255,255,.05); text-align:left; }
+.mlrow:last-child{ border-bottom:none; }
+.mlrow.on{ background:rgba(230,193,104,.12); }
+.ml-n{ width:30px; flex:0 0 auto; font-size:12px; }
+.ml-san{ width:64px; flex:0 0 auto; font-size:13.5px; font-weight:700; color:var(--txt); }
+.ml-best{ font-size:12px; }
+
+.badge{ font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap; flex:0 0 auto; }
+.b-book{ color:#bcd0e8; background:rgba(140,170,210,.16); }
+.b-best{ color:#0c1a12; background:var(--good); }
+.b-exc{ color:#bfe9cf; background:rgba(134,217,166,.18); }
+.b-good{ color:#cdd6cf; background:rgba(255,255,255,.08); }
+.b-inacc{ color:#f0d98a; background:rgba(230,200,90,.16); }
+.b-mistake{ color:#f2bd86; background:rgba(230,150,70,.18); }
+.b-blunder{ color:#241008; background:var(--bad); }
+
+.flipbtn{ align-self:center; margin-top:-4px; background:rgba(255,255,255,.04); border:1px solid var(--line); color:var(--muted);
+  font-size:12.5px; font-weight:600; padding:7px 16px; border-radius:999px; transition:.16s; }
+.flipbtn:hover{ color:var(--txt); border-color:rgba(230,193,104,.4); }
 `;
